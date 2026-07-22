@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Vehicle Inspection Pipeline</title>
+<style>
+  :root {
+    --bg: #0a0e14;
+    --panel: #111823;
+    --panel-2: #16202c;
+    --border: #212c3a;
+    --text: #e8edf2;
+    --muted: #7c8a9a;
+    --accent: #37e6c4;
+    --accent-dim: #1c6157;
+    --accent-ink: #072620;
+    --pass: #4ade80;
+    --fail: #f2545b;
+    --warn: #f2a93b;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); min-height: 100vh; overflow: hidden; }
+
+  .topbar { display: flex; align-items: center; justify-content: space-between; padding: 10px 20px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  .topbar h1 { font-size: 14px; font-weight: 600; margin: 0; display: flex; align-items: center; gap: 8px; }
+  .health { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); transition: background 0.3s; }
+  .dot.ok { background: var(--pass); box-shadow: 0 0 8px 1px rgba(74,222,128,0.5); }
+  .dot.down { background: var(--fail); box-shadow: 0 0 8px 1px rgba(242,84,91,0.5); }
+  .dot.pending { background: var(--warn); animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+  .api-input { background: transparent; border: none; border-bottom: 1px dashed var(--border); color: var(--muted); font-family: var(--mono); font-size: 11px; padding: 2px 0; width: 160px; }
+  .api-input:focus { outline: none; border-bottom-color: var(--accent); color: var(--text); }
+
+  /* --- Single-page app shell: everything below the topbar fits the viewport, this layer scrolls internally only if truly needed --- */
+  .app-body { height: calc(100vh - 45px); overflow-y: auto; }
+  .wrap { max-width: 1400px; margin: 0 auto; padding: 12px 20px 16px; }
+
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; margin-bottom: 10px; }
+  .stat { background: var(--panel); padding: 8px 14px; }
+  .stat .label { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-bottom: 3px; }
+  .stat .value { font-family: var(--mono); font-size: 17px; font-weight: 600; color: var(--text); }
+  .stat .value.accent { color: var(--accent); }
+
+  .section-label { font-family: var(--mono); font-size: 10px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--muted); margin: 0 0 8px 0; }
+
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; margin-bottom: 10px; }
+
+  /* upload */
+  .upload-row { display: flex; gap: 14px; align-items: stretch; }
+  .viewfinder { position: relative; width: 130px; min-width: 130px; aspect-ratio: 4/3; border-radius: 4px; background: var(--panel-2); cursor: pointer; overflow: hidden; display: flex; align-items: center; justify-content: center; text-align: center; }
+  .viewfinder:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .viewfinder .corner { position: absolute; width: 14px; height: 14px; border-color: var(--accent-dim); transition: border-color 0.25s; }
+  .viewfinder.active .corner, .viewfinder.dragover .corner { border-color: var(--accent); }
+  .corner.tl { top: 8px; left: 8px; border-top: 2px solid; border-left: 2px solid; }
+  .corner.tr { top: 8px; right: 8px; border-top: 2px solid; border-right: 2px solid; }
+  .corner.bl { bottom: 8px; left: 8px; border-bottom: 2px solid; border-left: 2px solid; }
+  .corner.br { bottom: 8px; right: 8px; border-bottom: 2px solid; border-right: 2px solid; }
+  .viewfinder.dragover { background: #1a2735; }
+  .viewfinder img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  .viewfinder .prompt { color: var(--muted); font-size: 10.5px; padding: 0 10px; }
+  .scanline { position: absolute; left: 0; right: 0; height: 2px; background: linear-gradient(90deg, transparent, var(--accent), transparent); box-shadow: 0 0 12px 1px var(--accent); display: none; }
+  .viewfinder.scanning .scanline { display: block; animation: sweep 1.6s linear infinite; }
+  @keyframes sweep { 0% { top:0%; opacity:0; } 10% { opacity:1; } 90% { opacity:1; } 100% { top:100%; opacity:0; } }
+  input[type="file"] { display: none; }
+
+  .upload-controls { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 6px; }
+  .filename { font-family: var(--mono); font-size: 11px; color: var(--muted); min-height: 14px; word-break: break-all; }
+  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  button { font-family: var(--sans); font-size: 12px; font-weight: 600; border-radius: 4px; cursor: pointer; padding: 7px 14px; border: 1px solid var(--border); background: var(--panel-2); color: var(--text); transition: background 0.15s, transform 0.1s; }
+  button:hover:not(:disabled) { background: #1c2836; }
+  button:active:not(:disabled) { transform: scale(0.99); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button.primary:hover:not(:disabled) { background: #52ecce; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .stage-log { font-family: var(--mono); font-size: 10.5px; color: var(--muted); line-height: 1.5; }
+  .stage-log .line { display: flex; gap: 6px; }
+  .stage-log .line .tick { color: var(--accent-dim); }
+  .stage-log .line.done .tick { color: var(--pass); }
+
+  /* results grid */
+  .results-grid { display: grid; grid-template-columns: 1.1fr 1fr; gap: 10px; }
+  @media (max-width: 900px) { .results-grid { grid-template-columns: 1fr; } }
+
+  .preview-frame { position: relative; border-radius: 4px; overflow: hidden; background: var(--panel-2); max-height: 130px; display: flex; align-items: center; justify-content: center; }
+  .preview-frame img { max-height: 130px; width: auto; max-width: 100%; display: block; }
+  .plate-box { position: absolute; border: 2px solid var(--accent); border-radius: 2px; }
+  .plate-box::after { content: 'plate match'; position: absolute; top: -18px; left: -2px; font-family: var(--mono); font-size: 9px; color: var(--accent-ink); background: var(--accent); padding: 1px 4px; border-radius: 2px; white-space: nowrap; }
+
+  .summary-list { display: flex; flex-direction: column; gap: 3px; }
+  .summary-item { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; border-bottom: 1px solid var(--border); }
+  .summary-item:last-child { border-bottom: none; }
+  .summary-item .k { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+  .summary-item .v { font-family: var(--mono); font-size: 12.5px; font-weight: 600; }
+  .summary-item .v.pass { color: var(--pass); }
+  .summary-item .v.fail { color: var(--fail); }
+
+  /* inspection cards */
+  .cards-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+  .card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 5px; padding: 8px 10px; border-left: 3px solid var(--muted); }
+  .card.pass { border-left-color: var(--pass); }
+  .card.fail, .card.error { border-left-color: var(--fail); }
+  .card.warning { border-left-color: var(--warn); }
+  .card-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+  .card-head .mark { font-size: 12px; }
+  .card-head .mark.pass { color: var(--pass); }
+  .card-head .mark.fail, .card-head .mark.error { color: var(--fail); }
+  .card-head .mark.warning { color: var(--warn); }
+  .card-title { font-size: 11px; font-weight: 600; }
+  .card-metric { font-family: var(--mono); font-size: 15px; font-weight: 600; margin-bottom: 1px; }
+  .card-sub { font-family: var(--mono); font-size: 9.5px; color: var(--muted); }
+
+  /* timeline */
+  .timeline-row { display: grid; grid-template-columns: 120px 1fr 50px; align-items: center; gap: 8px; margin-bottom: 4px; font-family: var(--mono); font-size: 10.5px; }
+  .timeline-row .name { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .timeline-track { background: var(--panel-2); border-radius: 2px; overflow: hidden; height: 6px; }
+  .timeline-fill { height: 100%; background: var(--accent); }
+  .timeline-row .ms { text-align: right; color: var(--muted); }
+
+  /* quality + confidence */
+  .meter-row { margin-bottom: 7px; }
+  .meter-row:last-child { margin-bottom: 0; }
+  .meter-label { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-bottom: 3px; }
+  .meter-label .pct { color: var(--text); font-weight: 600; }
+  .meter-track { background: var(--panel-2); border-radius: 3px; overflow: hidden; height: 7px; }
+  .meter-fill { height: 100%; background: linear-gradient(90deg, var(--accent-dim), var(--accent)); }
+
+  .split-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  @media (max-width: 900px) { .split-panels { grid-template-columns: 1fr; } }
+
+  /* verdict */
+  .verdict-row-combined { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .verdict-banner { display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-radius: 5px; flex-shrink: 0; }
+  .verdict-banner.pass { background: rgba(74,222,128,0.1); border: 1px solid rgba(74,222,128,0.3); }
+  .verdict-banner.fail { background: rgba(242,84,91,0.1); border: 1px solid rgba(242,84,91,0.3); }
+  .verdict-banner .big { font-size: 13px; font-weight: 700; letter-spacing: 0.02em; white-space: nowrap; }
+  .verdict-banner.pass .big { color: var(--pass); }
+  .verdict-banner.fail .big { color: var(--fail); }
+
+  /* compact pill checklist instead of a vertical list — main space saver */
+  .verdict-checklist { display: flex; flex-wrap: wrap; gap: 5px; flex: 1; }
+  .verdict-checklist .row { display: flex; align-items: center; gap: 5px; font-size: 11px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; padding: 3px 9px 3px 7px; white-space: nowrap; }
+  .verdict-checklist .row .mark.pass { color: var(--pass); }
+  .verdict-checklist .row .mark.fail { color: var(--fail); }
+
+  .export-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .export-row button { padding: 6px 12px; font-size: 11.5px; }
+
+  .empty-state { text-align: center; color: var(--muted); font-size: 12px; padding: 24px 16px; }
+  .error-box { background: rgba(242,84,91,0.08); border: 1px solid rgba(242,84,91,0.3); color: var(--fail); border-radius: 4px; padding: 10px 12px; font-family: var(--mono); font-size: 11px; line-height: 1.5; }
+
+  /* ---- Single-page print / PDF export ---- */
+  @page { size: A4 portrait; margin: 8mm; }
+  @media print {
+    .topbar, .upload-row, .export-row, .stage-log, .stats { display: none !important; }
+    html, body { background: #fff; color: #000; height: auto; overflow: visible; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .app-body { height: auto; overflow: visible; }
+    .wrap { max-width: none; padding: 0; transform: scale(0.62); transform-origin: top left; width: calc(100% / 0.62); }
+    .panel, .card, .stat { background: #fff; border-color: #ccc; break-inside: avoid; page-break-inside: avoid; margin-bottom: 10px; padding: 10px 12px; }
+    .results-grid, .split-panels { gap: 10px; margin-bottom: 0; }
+    .cards-grid { gap: 8px; }
+    .card { padding: 8px 10px; }
+    .card-metric { font-size: 15px; }
+    .section-label { margin-bottom: 8px; }
+    .verdict-banner { padding: 10px 12px; margin-bottom: 10px; }
+    .summary-item, .timeline-row { padding: 5px 0; margin-bottom: 4px; }
+    * { box-shadow: none !important; text-shadow: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>🚗 Vehicle Inspection Pipeline</h1>
+  <div class="health">
+    <input class="api-input" id="apiBase" value="http://localhost:3000" spellcheck="false" />
+    <span class="dot pending" id="healthDot"></span>
+    <span id="healthLabel">checking…</span>
+  </div>
+</div>
+
+<div class="app-body">
+<div class="wrap">
+
+  <div class="stats">
+    <div class="stat">
+      <div class="label">Analyzed this session</div>
+      <div class="value" id="statCount">0</div>
+    </div>
+    <div class="stat">
+      <div class="label">Avg processing time</div>
+      <div class="value" id="statAvg">—</div>
+    </div>
+    <div class="stat">
+      <div class="label">Pass rate (session)</div>
+      <div class="value accent" id="statPass">—</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <p class="section-label">Upload Vehicle Image</p>
+    <div class="upload-row">
+      <div class="viewfinder" id="viewfinder" tabindex="0" role="button" aria-label="Choose or drop a vehicle photo">
+        <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
+        <div class="scanline"></div>
+        <div class="prompt" id="dropPrompt"><strong>Drag &amp; Drop</strong><br />or click to browse</div>
+        <img id="preview" style="display:none;" alt="" />
+      </div>
+      <div class="upload-controls">
+        <div class="filename" id="filename">No image selected</div>
+        <div class="btn-row">
+          <button id="browseBtn">Select Image</button>
+          <button class="primary" id="analyzeBtn" disabled>Analyze Vehicle →</button>
+          <button id="demoBtn">▶ Preview Demo Result</button>
+        </div>
+        <div class="stage-log" id="stageLog"></div>
+      </div>
+    </div>
+    <input type="file" id="fileInput" accept="image/*" />
+  </div>
+
+  <div id="resultsArea">
+    <div class="panel"><div class="empty-state">Upload a photo and run analysis to see results here.</div></div>
+  </div>
+
+</div>
+</div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const apiBaseInput = $('apiBase'), healthDot = $('healthDot'), healthLabel = $('healthLabel');
+  const viewfinder = $('viewfinder'), fileInput = $('fileInput'), preview = $('preview'), dropPrompt = $('dropPrompt');
+  const filenameEl = $('filename'), analyzeBtn = $('analyzeBtn'), browseBtn = $('browseBtn'), stageLog = $('stageLog'), demoBtn = $('demoBtn');
+  const resultsArea = $('resultsArea');
+  const statCount = $('statCount'), statAvg = $('statAvg'), statPass = $('statPass');
+
+  let selectedFile = null;
+  let pollTimer = null;
+  const session = [];
+
+  const apiBase = () => apiBaseInput.value.trim().replace(/\/$/, '');
+  const escapeHtml = (str) => { const d = document.createElement('div'); d.textContent = str ?? ''; return d.innerHTML; };
+
+  async function checkHealth() {
+    healthDot.className = 'dot pending'; healthLabel.textContent = 'checking…';
+    try {
+      const res = await fetch(apiBase() + '/health', { cache: 'no-store' });
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      healthDot.className = 'dot ok'; healthLabel.textContent = data.status === 'ok' ? 'API Online' : 'API degraded';
+    } catch { healthDot.className = 'dot down'; healthLabel.textContent = 'API unreachable'; }
+  }
+  checkHealth(); setInterval(checkHealth, 15000); apiBaseInput.addEventListener('change', checkHealth);
+
+  function setFile(file) {
+    if (!file || !file.type.startsWith('image/')) return;
+    selectedFile = file;
+    filenameEl.textContent = file.name + '  ·  ' + Math.round(file.size / 1024) + ' KB';
+    preview.src = URL.createObjectURL(file);
+    preview.style.display = 'block'; dropPrompt.style.display = 'none';
+    analyzeBtn.disabled = false;
+    resultsArea.innerHTML = '<div class="panel"><div class="empty-state">Click "Analyze Vehicle" to run the checks.</div></div>';
+    stageLog.innerHTML = '';
+  }
+  browseBtn.addEventListener('click', () => fileInput.click());
+  viewfinder.addEventListener('click', () => fileInput.click());
+  viewfinder.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); } });
+  fileInput.addEventListener('change', e => setFile(e.target.files[0]));
+  ['dragenter','dragover'].forEach(evt => viewfinder.addEventListener(evt, e => { e.preventDefault(); viewfinder.classList.add('dragover'); }));
+  ['dragleave','drop'].forEach(evt => viewfinder.addEventListener(evt, e => { e.preventDefault(); viewfinder.classList.remove('dragover'); }));
+  viewfinder.addEventListener('drop', e => setFile(e.dataTransfer.files[0]));
+
+  function logStage(text, done) {
+    const line = document.createElement('div');
+    line.className = 'line' + (done ? ' done' : '');
+    line.innerHTML = '<span class="tick">' + (done ? '✓' : '·') + '</span><span>' + text + '</span>';
+    stageLog.appendChild(line);
+    return line;
+  }
+
+  function metricFor(check) {
+    const d = check.details || {};
+    switch (check.name) {
+      case 'dimension_validation': return { metric: (d.width||'?') + '×' + (d.height||'?'), sub: 'min ' + (d.minWidth||'?') + '×' + (d.minHeight||'?') };
+      case 'brightness_analysis': return { metric: (d.meanLuminance!=null ? d.meanLuminance.toFixed(1) : '—'), sub: 'range ' + d.lowThreshold + '–' + d.highThreshold };
+      case 'blur_detection': return { metric: (d.laplacianVariance!=null ? d.laplacianVariance.toFixed(1) : '—'), sub: 'threshold ' + d.threshold };
+      case 'screenshot_detection': return { metric: Math.round((d.score||0)*100) + '%', sub: (d.signals||[]).join(', ') || 'no signals' };
+      case 'photo_of_photo_detection': return { metric: Math.round((d.score||0)*100) + '%', sub: (d.signals||[]).join(', ') || 'no signals' };
+      case 'tampering_heuristics': return { metric: Math.round((d.score||0)*100) + '%', sub: (d.signals||[]).join(', ') || 'no signals' };
+      case 'plate_ocr_validation': return { metric: check.plateNumber || 'not found', sub: 'region: ' + (d.matchedRegion || 'none') };
+      case 'duplicate_detection': return { metric: d.closestMatch ? 'dist ' + d.closestMatch.distance : 'unique', sub: d.candidatesCompared + ' compared' };
+      default: return { metric: '—', sub: '' };
+    }
+  }
+
+  const DEMO_IMG = 'data:image/svg+xml;utf8,' + encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600">' +
+    '<rect width="800" height="600" fill="#1b2836"/>' +
+    '<rect x="120" y="230" width="560" height="180" rx="24" fill="#37e6c4" opacity="0.85"/>' +
+    '<rect x="180" y="150" width="440" height="120" rx="30" fill="#37e6c4" opacity="0.6"/>' +
+    '<circle cx="230" cy="410" r="42" fill="#0a0e14"/>' +
+    '<circle cx="570" cy="410" r="42" fill="#0a0e14"/>' +
+    '<rect x="320" y="350" width="160" height="46" rx="4" fill="#f5f5f5"/>' +
+    '<text x="400" y="382" font-family="monospace" font-size="26" fill="#111" text-anchor="middle">KA 19 AB 4521</text>' +
+    '</svg>'
+  );
+
+  function buildDemoData() {
+    return {
+      id: 'demo-' + Math.random().toString(36).slice(2, 10),
+      overallVerdict: 'passed',
+      plateNumber: 'KA 19 AB 4521',
+      checks: [
+        { name: 'dimension_validation', label: 'Dimension Validation', status: 'pass', confidence: 0.98, durationMs: 12, details: { width: 1920, height: 1440, minWidth: 800, minHeight: 600 } },
+        { name: 'brightness_analysis', label: 'Brightness Analysis', status: 'pass', confidence: 0.91, durationMs: 34, details: { meanLuminance: 128.4, lowThreshold: 40, highThreshold: 220 } },
+        { name: 'blur_detection', label: 'Blur Detection', status: 'pass', confidence: 0.88, durationMs: 57, details: { laplacianVariance: 342.7, threshold: 100 } },
+        { name: 'screenshot_detection', label: 'Screenshot Detection', status: 'pass', confidence: 0.95, durationMs: 41, details: { score: 0.03, signals: [] } },
+        { name: 'photo_of_photo_detection', label: 'Photo-of-Photo Detection', status: 'warning', confidence: 0.72, durationMs: 88, details: { score: 0.31, signals: ['moire pattern (weak)'] } },
+        { name: 'tampering_heuristics', label: 'Tampering Heuristics', status: 'pass', confidence: 0.93, durationMs: 63, details: { score: 0.06, signals: [] } },
+        { name: 'plate_ocr_validation', label: 'Plate OCR Validation', status: 'pass', confidence: 0.97, durationMs: 210, plateNumber: 'KA 19 AB 4521',
+          details: { matchedRegion: 'front', regionDebug: [ { region: 'front', box: { left: 320, top: 350, width: 160, height: 46 } } ] } },
+        { name: 'duplicate_detection', label: 'Duplicate Detection', status: 'pass', confidence: 0.99, durationMs: 145, details: { closestMatch: null, candidatesCompared: 1284 } }
+      ]
+    };
+  }
+
+  demoBtn.addEventListener('click', () => {
+    resultsArea.innerHTML = '';
+    stageLog.innerHTML = '';
+    preview.src = DEMO_IMG;
+    preview.style.display = 'block';
+    dropPrompt.style.display = 'none';
+    filenameEl.textContent = 'demo-vehicle.jpg · 214 KB (sample)';
+    analyzeBtn.disabled = false;
+    viewfinder.classList.add('scanning');
+    logStage('Uploading Image…', true);
+    logStage('Queued — id demo1234…', true);
+    logStage('Running AI Checks…', true);
+    const demoData = buildDemoData();
+    setTimeout(() => {
+      viewfinder.classList.remove('scanning');
+      const elapsedMs = 1240;
+      session.push({ verdict: demoData.overallVerdict, ms: elapsedMs });
+      updateStats();
+      renderResults(demoData, elapsedMs);
+    }, 500);
+  });
+
+  analyzeBtn.addEventListener('click', async () => {
+    if (!selectedFile) return;
+    resultsArea.innerHTML = '';
+    stageLog.innerHTML = '';
+    analyzeBtn.disabled = true;
+    viewfinder.classList.add('scanning');
+    const t0 = performance.now();
+
+    const uploadLine = logStage('Uploading Image…', false);
+    try {
+      const form = new FormData();
+      form.append('image', selectedFile);
+      const uploadRes = await fetch(apiBase() + '/api/images', { method: 'POST', body: form });
+      if (!uploadRes.ok) throw new Error('Upload failed: HTTP ' + uploadRes.status);
+      const uploaded = await uploadRes.json();
+      uploadLine.className = 'line done';
+      logStage('Queued — id ' + uploaded.id.slice(0,8) + '…', true);
+      const runningLine = logStage('Running AI Checks…', false);
+      pollStatus(uploaded.id, runningLine, t0);
+    } catch (err) {
+      viewfinder.classList.remove('scanning');
+      analyzeBtn.disabled = false;
+      showError(err.message || String(err));
+    }
+  });
+
+  function pollStatus(id, runningLine, t0) {
+    fetch(apiBase() + '/api/images/' + id + '/status', { cache: 'no-store' })
+      .then(r => r.json())
+      .then(data => {
+        if (data.status === 'completed') {
+          runningLine.className = 'line done';
+          fetchResults(id, t0);
+        } else if (data.status === 'failed') {
+          viewfinder.classList.remove('scanning'); analyzeBtn.disabled = false;
+          showError(data.failureReason || 'Analysis failed.');
+        } else {
+          pollTimer = setTimeout(() => pollStatus(id, runningLine, t0), 1500);
+        }
+      })
+      .catch(err => { viewfinder.classList.remove('scanning'); analyzeBtn.disabled = false; showError('Status check failed: ' + err.message); });
+  }
+
+  async function fetchResults(id, t0) {
+    try {
+      const res = await fetch(apiBase() + '/api/images/' + id + '/results');
+      if (!res.ok) throw new Error('Results fetch failed: HTTP ' + res.status);
+      const data = await res.json();
+      const elapsedMs = Math.round(performance.now() - t0);
+      viewfinder.classList.remove('scanning'); analyzeBtn.disabled = false;
+      session.push({ verdict: data.overallVerdict, ms: elapsedMs });
+      updateStats();
+      renderResults(data, elapsedMs);
+    } catch (err) {
+      viewfinder.classList.remove('scanning'); analyzeBtn.disabled = false;
+      showError(err.message || String(err));
+    }
+  }
+
+  function updateStats() {
+    statCount.textContent = session.length;
+    const avg = session.reduce((a,s) => a + s.ms, 0) / session.length;
+    statAvg.textContent = (avg/1000).toFixed(1) + 's';
+    const passed = session.filter(s => s.verdict === 'passed').length;
+    statPass.textContent = Math.round((passed/session.length)*100) + '%';
+  }
+
+  function showError(message) {
+    resultsArea.innerHTML = '<div class="panel"><div class="error-box">✕ ' + escapeHtml(message) + '</div></div>';
+  }
+
+  function renderResults(data, elapsedMs) {
+    const checks = data.checks || [];
+    const verdictPass = data.overallVerdict === 'passed';
+    const plateCheck = checks.find(c => c.name === 'plate_ocr_validation');
+    const plateNumber = data.plateNumber || (plateCheck && plateCheck.plateNumber) || '—';
+    const avgConfidence = checks.length ? Math.round((checks.reduce((a,c)=>a+(c.confidence||0),0)/checks.length)*100) : 0;
+
+    let box = null;
+    if (plateCheck && plateCheck.details) {
+      const region = plateCheck.details.matchedRegion;
+      const dbg = (plateCheck.details.regionDebug || []).find(r => r.region === region && r.box);
+      if (dbg && dbg.box) box = dbg.box;
+    }
+
+    let html = '';
+
+    html += '<div class="results-grid">';
+    html += '  <div class="panel"><p class="section-label">Image Preview</p><div class="preview-frame" id="previewFrame"><img src="' + preview.src + '" id="resultImg" alt="" /></div></div>';
+    html += '  <div class="panel"><p class="section-label">Analysis Summary</p><div class="summary-list">';
+    html += '    <div class="summary-item"><span class="k">Verdict</span><span class="v ' + (verdictPass ? 'pass' : 'fail') + '">' + (verdictPass ? '🟢 Passed' : '🔴 Flagged') + '</span></div>';
+    html += '    <div class="summary-item"><span class="k">Avg Confidence</span><span class="v">' + avgConfidence + '%</span></div>';
+    html += '    <div class="summary-item"><span class="k">Plate</span><span class="v">' + escapeHtml(plateNumber) + '</span></div>';
+    html += '    <div class="summary-item"><span class="k">Time</span><span class="v">' + (elapsedMs/1000).toFixed(1) + 's</span></div>';
+    html += '  </div></div>';
+    html += '</div>';
+
+    html += '<div class="panel"><p class="section-label">AI Inspection Cards</p><div class="cards-grid">';
+    checks.forEach(c => {
+      const m = metricFor(c);
+      const mark = c.status === 'pass' ? '✓' : (c.status === 'warning' ? '!' : '✗');
+      html += '<div class="card ' + c.status + '">';
+      html += '  <div class="card-head"><span class="mark ' + c.status + '">' + mark + '</span><span class="card-title">' + escapeHtml(c.label || c.name) + '</span></div>';
+      html += '  <div class="card-metric">' + escapeHtml(String(m.metric)) + '</div>';
+      html += '  <div class="card-sub">' + escapeHtml(m.sub) + '</div>';
+      html += '</div>';
+    });
+    html += '</div></div>';
+
+    const maxMs = Math.max(...checks.map(c => c.durationMs || 0), 1);
+    html += '<div class="split-panels">';
+    html += '  <div class="panel"><p class="section-label">Timeline</p>';
+    checks.forEach(c => {
+      const pct = Math.max(4, Math.round(((c.durationMs||0)/maxMs)*100));
+      html += '<div class="timeline-row"><span class="name">' + escapeHtml(c.label || c.name) + '</span><div class="timeline-track"><div class="timeline-fill" style="width:' + pct + '%"></div></div><span class="ms">' + (c.durationMs||0) + 'ms</span></div>';
+    });
+    html += '  </div>';
+
+    html += '  <div class="panel"><p class="section-label">Quality &amp; Confidence</p>';
+    const qualityChecks = ['dimension_validation','brightness_analysis','blur_detection'];
+    const qc = checks.filter(c => qualityChecks.includes(c.name));
+    const qScore = qc.length ? Math.round((qc.reduce((a,c)=>a+(c.confidence||0),0)/qc.length)*100) : 0;
+    html += '    <div class="meter-row"><div class="meter-label"><span>Image Quality</span><span class="pct">' + qScore + '%</span></div><div class="meter-track"><div class="meter-fill" style="width:' + qScore + '%"></div></div></div>';
+    ['plate_ocr_validation','blur_detection','brightness_analysis','tampering_heuristics'].forEach(name => {
+      const c = checks.find(ch => ch.name === name);
+      if (!c) return;
+      const pct = Math.round((c.confidence||0)*100);
+      const label = { plate_ocr_validation: 'OCR', blur_detection: 'Blur', brightness_analysis: 'Brightness', tampering_heuristics: 'Tampering' }[name];
+      html += '    <div class="meter-row"><div class="meter-label"><span>' + label + '</span><span class="pct">' + pct + '%</span></div><div class="meter-track"><div class="meter-fill" style="width:' + pct + '%"></div></div></div>';
+    });
+    html += '  </div>';
+    html += '</div>';
+
+    // verdict panel — banner and checklist pills sit on one row to save vertical space
+    html += '<div class="panel"><p class="section-label">Final Verdict</p>';
+    html += '  <div class="verdict-row-combined">';
+    html += '    <div class="verdict-banner ' + (verdictPass ? 'pass' : 'fail') + '"><span style="font-size:16px;">' + (verdictPass ? '🟢' : '🔴') + '</span><span class="big">' + (verdictPass ? 'APPROVED' : 'REJECTED') + '</span></div>';
+    html += '    <div class="verdict-checklist">';
+    checks.forEach(c => {
+      const ok = c.status === 'pass';
+      html += '<span class="row"><span class="mark ' + (ok?'pass':'fail') + '">' + (ok?'✓':'✗') + '</span><span>' + escapeHtml(c.label || c.name) + '</span></span>';
+    });
+    html += '    </div>';
+    html += '  </div>';
+
+    html += '  <div class="export-row">';
+    html += '    <button id="exportJsonBtn">📊 Download JSON</button>';
+    html += '    <button id="exportPdfBtn">📄 Download PDF</button>';
+    html += '    <button id="exportShotBtn">📷 Save Screenshot</button>';
+    html += '    <button class="primary" id="analyzeAnotherBtn">🔄 Analyze Another Image</button>';
+    html += '  </div>';
+    html += '</div>';
+
+    resultsArea.innerHTML = html;
+
+    if (box) {
+      const img = $('resultImg');
+      const drawBox = () => {
+        const frame = $('previewFrame');
+        const scaleX = img.clientWidth / img.naturalWidth;
+        const scaleY = img.clientHeight / img.naturalHeight;
+        const el = document.createElement('div');
+        el.className = 'plate-box';
+        el.style.left = (box.left * scaleX) + 'px';
+        el.style.top = (box.top * scaleY) + 'px';
+        el.style.width = (box.width * scaleX) + 'px';
+        el.style.height = (box.height * scaleY) + 'px';
+        frame.appendChild(el);
+      };
+      if (img.complete) drawBox(); else img.addEventListener('load', drawBox);
+    }
+
+    $('exportJsonBtn').addEventListener('click', () => {
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'inspection-' + data.id + '.json';
+      a.click();
+    });
+
+    $('exportPdfBtn').addEventListener('click', () => window.print());
+
+    $('exportShotBtn').addEventListener('click', () => {
+      const canvas = document.createElement('canvas');
+      const W = 640, H = 480;
+      canvas.width = W; canvas.height = H;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#0a0e14'; ctx.fillRect(0,0,W,H);
+      const img = $('resultImg');
+      const iw = Math.min(W - 40, 300), ih = (img.naturalHeight/img.naturalWidth)*iw;
+      try { ctx.drawImage(img, 20, 20, iw, ih); } catch(e) {}
+      ctx.fillStyle = verdictPass ? '#4ade80' : '#f2545b';
+      ctx.font = 'bold 18px monospace';
+      ctx.fillText(verdictPass ? 'VEHICLE APPROVED' : 'VEHICLE REJECTED', 20, ih + 50);
+      ctx.fillStyle = '#e8edf2';
+      ctx.font = '13px monospace';
+      ctx.fillText('Plate: ' + plateNumber, 20, ih + 75);
+      ctx.fillText('Confidence: ' + avgConfidence + '%', 20, ih + 95);
+      ctx.fillText('Time: ' + (elapsedMs/1000).toFixed(1) + 's', 20, ih + 115);
+      const a = document.createElement('a');
+      a.href = canvas.toDataURL('image/png');
+      a.download = 'inspection-summary-' + data.id + '.png';
+      a.click();
+    });
+
+    $('analyzeAnotherBtn').addEventListener('click', () => {
+      selectedFile = null;
+      fileInput.value = '';
+      preview.style.display = 'none';
+      dropPrompt.style.display = 'block';
+      filenameEl.textContent = 'No image selected';
+      analyzeBtn.disabled = true;
+      stageLog.innerHTML = '';
+      resultsArea.innerHTML = '<div class="panel"><div class="empty-state">Upload a photo and run analysis to see results here.</div></div>';
+    });
+  }
+})();
+</script>
+
+</body>
+</html>

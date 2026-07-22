@@ -1,0 +1,9 @@
+node_modules
+dist
+storage/uploads/*
+!storage/uploads/.gitkeep
+tmp-seed
+.env
+.git
+*.log
+coverage

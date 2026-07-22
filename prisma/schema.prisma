@@ -1,0 +1,76 @@
+// Prisma schema for the Intelligent Media Processing Pipeline
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ProcessingStatus {
+  pending
+  processing
+  completed
+  failed
+}
+
+enum OverallVerdict {
+  clean
+  flagged
+  unknown
+}
+
+/// One row per uploaded image. This is the source of truth for upload
+/// metadata and the current lifecycle state of async processing.
+model Image {
+  id               String           @id @default(uuid())
+  originalFilename String
+  storagePath      String
+  mimeType         String
+  sizeBytes        Int
+  width            Int?
+  height           Int?
+
+  // perceptual hash used for near-duplicate detection across the whole
+  // dataset. Indexed so duplicate lookups don't require a full table scan.
+  perceptualHash   String?
+
+  status           ProcessingStatus @default(pending)
+  failureReason    String?
+  attempts         Int              @default(0)
+
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  processingStartedAt DateTime?
+  processingCompletedAt DateTime?
+
+  analysis         AnalysisResult?
+
+  @@index([status])
+  @@index([perceptualHash])
+  @@index([createdAt])
+}
+
+/// Structured output of the analysis pipeline for a given image.
+/// One-to-one with Image. `checks` holds the full per-check breakdown so the
+/// API can return granular results without needing extra tables, while
+/// `issues` / `overallVerdict` give a fast, queryable summary.
+model AnalysisResult {
+  id             String         @id @default(uuid())
+  imageId        String         @unique
+  image          Image          @relation(fields: [imageId], references: [id], onDelete: Cascade)
+
+  overallVerdict OverallVerdict @default(unknown)
+  issues         Json           // string[] of issue codes, e.g. ["blurry", "low_light"]
+  checks         Json           // full per-check results, see AnalysisReport type in src/types
+  extractedText  String?        // raw OCR text, if any
+  plateNumber    String?        // best-guess normalized plate number, if found
+  plateValid     Boolean?       // whether plate matches expected format
+
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@index([overallVerdict])
+}
