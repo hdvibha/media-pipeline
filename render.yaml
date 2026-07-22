@@ -5,38 +5,16 @@ services:
     dockerfilePath: ./Dockerfile
     plan: free
     healthCheckPath: /health
-    dockerCommand: sh -c "npx prisma migrate deploy && node dist/index.js"
+    # Free tier has no standalone "background worker" service type, so the
+    # queue worker runs alongside the API in the same container: started
+    # first in the background (&), then the API runs in the foreground so
+    # the container has a long-lived process to stay alive on.
+    dockerCommand: sh -c "npx prisma migrate deploy && node dist/queue/worker.js & node dist/index.js"
     envVars:
       - key: NODE_ENV
         value: production
       - key: PORT
         value: 3000
-      - key: STORAGE_DIR
-        value: storage/uploads
-      - key: DATABASE_URL
-        fromDatabase:
-          name: media-pipeline-db
-          property: connectionString
-      - key: REDIS_HOST
-        fromService:
-          name: media-pipeline-redis
-          type: redis
-          property: host
-      - key: REDIS_PORT
-        fromService:
-          name: media-pipeline-redis
-          type: redis
-          property: port
-
-  - type: worker
-    name: media-pipeline-worker
-    runtime: docker
-    dockerfilePath: ./Dockerfile
-    plan: free
-    dockerCommand: node dist/queue/worker.js
-    envVars:
-      - key: NODE_ENV
-        value: production
       - key: STORAGE_DIR
         value: storage/uploads
       - key: QUEUE_CONCURRENCY
