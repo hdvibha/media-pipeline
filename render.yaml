@@ -1,0 +1,67 @@
+services:
+  - type: web
+    name: media-pipeline-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    dockerCommand: sh -c "npx prisma migrate deploy && node dist/index.js"
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: STORAGE_DIR
+        value: storage/uploads
+      - key: DATABASE_URL
+        fromDatabase:
+          name: media-pipeline-db
+          property: connectionString
+      - key: REDIS_HOST
+        fromService:
+          name: media-pipeline-redis
+          type: redis
+          property: host
+      - key: REDIS_PORT
+        fromService:
+          name: media-pipeline-redis
+          type: redis
+          property: port
+
+  - type: worker
+    name: media-pipeline-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    dockerCommand: node dist/queue/worker.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: STORAGE_DIR
+        value: storage/uploads
+      - key: QUEUE_CONCURRENCY
+        value: 2
+      - key: DATABASE_URL
+        fromDatabase:
+          name: media-pipeline-db
+          property: connectionString
+      - key: REDIS_HOST
+        fromService:
+          name: media-pipeline-redis
+          type: redis
+          property: host
+      - key: REDIS_PORT
+        fromService:
+          name: media-pipeline-redis
+          type: redis
+          property: port
+
+  - type: redis
+    name: media-pipeline-redis
+    plan: free
+    ipAllowList: []
+
+databases:
+  - name: media-pipeline-db
+    plan: free
+    postgresMajorVersion: 16
