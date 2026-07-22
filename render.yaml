@@ -5,11 +5,7 @@ services:
     dockerfilePath: ./Dockerfile
     plan: free
     healthCheckPath: /health
-    # Free tier has no standalone "background worker" service type, so the
-    # queue worker runs alongside the API in the same container: started
-    # first in the background (&), then the API runs in the foreground so
-    # the container has a long-lived process to stay alive on.
-    dockerCommand: sh -c "npx prisma migrate deploy && node dist/queue/worker.js & node dist/index.js"
+
     envVars:
       - key: NODE_ENV
         value: production
